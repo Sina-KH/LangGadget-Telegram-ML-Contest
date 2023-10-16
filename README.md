@@ -1,6 +1,6 @@
 ## LangGadget
 
-`LangGadget` is a library, that detects a programming or markup language of a code snippet. [Supporting 76 Languages!](documentations/05_supported_languages.md)
+`LangGadget` is a library, that detects a programming or markup language of a code snippet. [Supporting 76 Languages!](src/documentations/05_supported_languages.md)
 
 - Accuracy: ~91.34% (I used around 30% of my dataset in training phase because of time (download size of dataset))
 
@@ -37,19 +37,19 @@ I've added more repositories into `/data/other_repositories.csv` file in dataset
 
 To make it download the repositories and work:
 
-- Make sure you have installed requirements from [here](documentations/01_install_requirements.md).
+- Make sure you have installed requirements from [here](src/documentations/01_install_requirements.md).
 - Run the main command for dataset generator:
   - Open dataset generator directory: `cd 01_DatasetGenerator`
   - Run this command: `python __main__.py CACHE_PATH` Please note that the CACHE_PATH should be the directory you want to use as your dataset directory on your system. Make sure you have enough disk space on your machine. 150GB is recommended.
   - Wait for it to download the repositories and run the workflow. Finally, You will have your dataset prepared for training in the `CACHE_PATH/files` directory.
 
-**You can read more about dataset generation and available input arguments (to control dataset size), [here](documentations/02_dataset_generation.md).**
+**You can read more about dataset generation and available input arguments (to control dataset size), [here](src/documentations/02_dataset_generation.md).**
 
 ## Step 3. Training
 
 `guesslang --train /home/sina/guesslang/cache/files --steps 1000 --model /home/sina/guesslang/cache/model`
 
-You can find more info [here in documentations files](documentations/03_train.md).
+You can find more info [here in documentations files](src/documentations/03_train.md).
 
 ## Final Step. Using it!
 
