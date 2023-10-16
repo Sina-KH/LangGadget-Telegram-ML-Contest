@@ -1,0 +1,17 @@
+// Sample message to send via toncli 
+// Sets/changes value in the dictionary
+
+"Asm.fif" include
+
+<b 
+
+1 32 u,
+123 64 u,
+3 32 u,
+
+<b
+"kQBtO0gynpAGdXQn0lyYL2QhhGQQ_4PHe2kIM50eSuP9NX7z" $,
+b>
+ref, 
+
+b>

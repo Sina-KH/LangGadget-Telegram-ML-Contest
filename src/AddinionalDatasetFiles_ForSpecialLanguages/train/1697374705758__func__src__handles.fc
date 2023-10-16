@@ -1,0 +1,183 @@
+() handle_accept_invite(slice sender_addr, int my_balance, int msg_value, slice in_msg) impure inline_ref {
+  throw_if(error::less_reserved, msg_value < smc::reserved);
+  (slice owner_addr, cell games_dict, cell global_dict) = load_data();
+  slice opp_addr = in_msg~load_msg_addr();
+  int game_key = in_msg.preload_uint(64);
+
+  (slice game, int f) = games_dict.udict_get?(64, game_key);
+  throw_unless(error::game_not_exists, f);
+  game~load_msg_addr();
+  game~load_msg_addr();
+  int bet = game~load_coins();
+  throw_if(error::wrong_bet, (msg_value - smc::reserved) != bet);
+
+  (int sender_roll, int opp_roll) = play_dice();
+
+  int sender_won = sender_roll > opp_roll;
+  int opp_won = opp_roll > sender_roll;
+
+  int ton_value = muldiv(bet, 2, 100) * (100 - smc::share);
+
+  cell own_body = begin_cell()
+          .store_uint(0, 32)
+          .store_slice(text::own)
+          .store_number(sender_roll, 0)
+          .store_uint(32, 8) ;; " "
+          .store_slice(text::opp)
+          .store_number(opp_roll, 0)
+          .end_cell();
+  send_text((sender_won ? ton_value : 0) + smc::reserved, sender_addr, own_body, 1);
+
+  cell opp_body = begin_cell()
+          .store_uint(0, 32)
+          .store_slice(text::own)
+          .store_number(opp_roll, 0)
+          .store_uint(32, 8) ;; " "
+          .store_slice(text::opp)
+          .store_number(sender_roll, 0)
+          .end_cell();
+  send_text(opp_won ? ton_value : 1, opp_addr, opp_body, 1);
+
+  games_dict~udict_delete?(64, game_key);
+  store_data(owner_addr, games_dict, global_dict);
+}
+
+() handle_create_invite(slice sender_addr, int my_balance, int msg_value, slice in_msg) impure inline_ref {
+  throw_if(error::less_reserved, msg_value < smc::reserved);
+  slice opp_addr = in_msg~load_msg_addr();
+  (slice owner_addr, cell games_dict, cell global_dict) = load_data();
+
+  (slice game, int game_key, int f) = games_dict.find_game(opp_addr, sender_addr);
+  throw_if(error::game_exists, f);
+  int new_bet = msg_value - smc::reserved;
+  games_dict~udict_set_builder(64, cur_lt(), begin_cell().store_slice(sender_addr).store_slice(opp_addr).store_coins(new_bet));
+
+
+  cell body_new = begin_cell()
+          .store_uint(0, 32)
+          .store_slice(text::new)
+          .end_cell();
+  cell body_accept = begin_cell()
+          .store_uint(0, 32)
+          .store_slice(text::accepted)
+          .end_cell();
+  send_text(smc::reserved, sender_addr, body_accept, 2);
+  send_text(1, opp_addr, body_new, 3);
+
+  store_data(owner_addr, games_dict, global_dict);
+}
+
+() handle_create_global(slice sender_addr, int my_balance, int msg_value, slice in_msg) impure inline_ref {
+  throw_if(error::less_reserved, msg_value < smc::reserved);
+  (slice owner_addr, cell games_dict, cell global_dict) = load_data();
+
+  int new_bet = msg_value - smc::reserved;
+  global_dict~udict_set_builder(64, cur_lt(), begin_cell().store_slice(sender_addr).store_coins(new_bet));
+
+
+  cell body_accept = begin_cell()
+          .store_uint(0, 32)
+          .store_slice(text::accepted)
+          .end_cell();
+
+  send_text(smc::reserved, sender_addr, body_accept, 2);
+
+
+  store_data(owner_addr, games_dict, global_dict);
+}
+
+() handle_accept_global(slice sender_addr, int my_balance, int msg_value, slice in_msg) impure inline_ref {
+  throw_if(error::less_reserved, msg_value < smc::reserved);
+  (slice owner_addr, cell games_dict, cell global_dict) = load_data();
+  int game_key = in_msg.preload_uint(64);
+
+  (slice game, int f) = global_dict.udict_get?(64, game_key);
+  throw_unless(error::game_not_exists, f);
+  slice opp_addr = game~load_msg_addr();
+  int bet = game~load_coins();
+  throw_if(error::wrong_bet, (msg_value - smc::reserved) != bet);
+
+  (int sender_roll, int opp_roll) = play_dice();
+
+  int sender_won = sender_roll > opp_roll;
+  int opp_won = opp_roll > sender_roll;
+
+  int ton_value = muldiv(bet, 2, 100) * (100 - smc::share);
+
+  cell own_body = begin_cell()
+          .store_uint(0, 32)
+          .store_slice(text::own)
+          .store_number(sender_roll, 0)
+          .store_uint(32, 8) ;; " "
+          .store_slice(text::opp)
+          .store_number(opp_roll, 0)
+          .end_cell();
+  send_text((sender_won ? ton_value : 0) + smc::reserved, sender_addr, own_body, 1);
+
+  cell opp_body = begin_cell()
+          .store_uint(0, 32)
+          .store_slice(text::own)
+          .store_number(opp_roll, 0)
+          .store_uint(32, 8) ;; " "
+          .store_slice(text::opp)
+          .store_number(sender_roll, 0)
+          .end_cell();
+  send_text(opp_won ? ton_value : 1, opp_addr, opp_body, 1);
+
+  global_dict~udict_delete?(64, game_key);
+  store_data(owner_addr, games_dict, global_dict);
+}
+
+() handle_withdraw(slice sender_addr, int my_balance, int msg_value) impure inline_ref {
+  (slice owner_addr, _, _) = load_data();
+  int is_owner = sdeq(sender_addr, owner_addr);
+  cell take_body = begin_cell()
+          .store_uint(0, 32)
+          .store_slice(is_owner ? text::take_owner : text::take_unkwonw)
+          .end_cell();
+
+  send_text(is_owner ? (my_balance / 2) : msg_value, sender_addr, take_body, 1);
+}
+
+() handle_cancel_invite(slice sender_addr, int my_balance, int msg_value, slice in_msg) impure inline_ref {
+  throw_if(error::less_reserved, msg_value < smc::reserved);
+  (slice owner_addr, cell games_dict, cell global_dict) = load_data();
+  int game_key = in_msg.preload_uint(64);
+
+  (slice game, int deleted) = games_dict~udict_delete_get?(64, game_key);
+  throw_unless(error::game_not_exists, deleted);
+
+  game~load_msg_addr();
+  game~load_msg_addr();
+  int bet = game~load_coins();
+
+  cell body = begin_cell()
+          .store_uint(0, 32)
+          .store_slice(text::game_canceled)
+          .end_cell();
+
+  send_text(bet, sender_addr, body, 64);
+
+  store_data(owner_addr, games_dict, global_dict);
+}
+
+() handle_cancel_global(slice sender_addr, int my_balance, int msg_value, slice in_msg) impure inline_ref {
+  throw_if(error::less_reserved, msg_value < smc::reserved);
+  (slice owner_addr, cell games_dict, cell global_dict) = load_data();
+  int game_key = in_msg.preload_uint(64);
+
+  (slice game, int deleted) = global_dict~udict_delete_get?(64, game_key);
+  throw_unless(error::game_not_exists, deleted);
+
+  game~load_msg_addr();
+  int bet = game~load_coins();
+
+  cell body = begin_cell()
+          .store_uint(0, 32)
+          .store_slice(text::game_canceled)
+          .end_cell();
+
+  send_text(bet, sender_addr, body, 64);
+
+  store_data(owner_addr, games_dict, global_dict);
+}

@@ -1,0 +1,224 @@
+
+#include "../func/ads_constants.fc";
+
+int __test_wrongmessage() {
+
+  slice ad = my_address();
+
+  ;; Wrong body because it doesn't start with signature
+  var body = begin_cell()
+    .store_uint(1, 32) ;; seqno
+    .store_uint(123, 32) ;; op
+    .store_slice(my_address())
+  .end_cell();
+  var sbody = body.begin_parse();
+
+  var full = begin_cell()
+    .store_uint(0x6, 4)                         ;; 4 for flags
+    .store_slice(ad)                            ;; 2..267 sender_address for addr_none would be 2 bits 00 --normally will be replaced by sender address
+    .store_slice(ad)                            ;; 2..267  0043800efd...73010  // destination address
+    .store_coins(1000)                          ;; 4..16(?)   // VarUInteger 16 (variable size)
+    .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 ) ;; extra-currencies (1), ihr-fee (4 for empty VarUInteger 16), fwd-fee (4), cur_lt (64), now (32) init (1)
+    .store_uint(1,1)              ;; Not inplace, reference for body
+    .store_ref(body)
+  .end_cell();
+  var sfull = full.begin_parse();
+  ;; sfull~dump();
+
+
+  ;; We build stack using as signature of receiver:
+  ;;() recv_internal (int balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+
+  tuple pila = unsafe_tuple([
+      1000, ;; coins
+      10,  ;; msg_value
+      full, ;; in_msg_full
+      sbody   ;; msg_body
+  ]);
+
+  ;; We build storage with manager address as manager and no_address
+  cell data = begin_cell()             ;; initial data of contract
+      .store_slice(ad)               ;; counter
+      .store_uint(0, 256)              ;; none_address
+      .store_dict(new_dict())
+      .end_cell();
+
+  var (int exit_code, int gas_usado1, return_values) = invoke_method_full(recv_internal, pila);
+ 
+  exit_code~dump();
+  throw_if(100, exit_code != 9);
+
+  return gas_usado1;
+}
+
+
+int __test_wrongseqno() {
+
+  slice ad = my_address();
+
+  var body2 = begin_cell()
+    .store_uint(1, 32) ;; seqno
+    .store_uint(OP_SELLER_CREATES_AD, 32) ;; op  
+    .end_cell();
+
+  var body = begin_cell()
+    .store_uint(0, 256) ;; signature part 1
+    .store_uint(0, 256) ;; signature part 2
+    .store_ref(body2)
+    .end_cell();
+
+  slice sbody = body.begin_parse();
+
+  var full = begin_cell()
+    .store_uint(0x6, 4)                         ;; 4 for flags
+    .store_slice(ad)                            ;; 2..267 sender_address for addr_none would be 2 bits 00 --normally will be replaced by sender address
+    .store_slice(ad)                            ;; 2..267  0043800efd...73010  // destination address
+    .store_coins(1000)                          ;; 4..16(?)   // VarUInteger 16 (variable size)
+    .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 ) ;; extra-currencies (1), ihr-fee (4 for empty VarUInteger 16), fwd-fee (4), cur_lt (64), now (32) init (1)
+    .store_uint(1,1)                         ;; inplace
+    .store_ref(body)
+  .end_cell();
+  var sfull = full.begin_parse();
+  ;; sfull~dump();
+
+
+  ;; We build stack using as signature of receiver:
+  ;;() recv_internal (int balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+
+  tuple pila = unsafe_tuple([
+      1000, ;; coins
+      10,  ;; msg_value
+      full, ;; in_msg_full
+      sbody   ;; msg_body
+  ]);
+
+  cell data = begin_cell()             ;; initial data of contract
+      .store_uint(2, 32)              ;; seqno
+      .store_dict(new_dict())          ;; dictionary
+      .store_dict(new_dict())          ;; dictionary
+      .store_dict(new_dict())          ;; dictionary
+      .end_cell();
+
+  set_data(data);
+
+  var (int exit_code, int gas_usado1, return_values) = invoke_method_full(recv_internal, pila);
+ 
+  exit_code~dump();
+  throw_if(100, exit_code != ERR_WRONG_SEQNO);
+
+  return gas_usado1;
+}
+
+
+int __test_wrongsignature() {
+
+  slice ad = my_address();
+
+  var body2 = begin_cell()
+    .store_uint(1, 32) ;; seqno
+    .store_uint(OP_SELLER_CREATES_AD, 32) ;; op  
+    .store_slice(my_address())
+    .end_cell();
+
+  var body = begin_cell()
+    .store_uint(0, 256) ;; signature part 1
+    .store_uint(0, 256) ;; signature part 2
+    .store_ref(body2)
+    .end_cell();
+  var sbody = body.begin_parse();
+
+  var full = begin_cell()
+    .store_uint(0x6, 4)                         ;; 4 for flags
+    .store_slice(ad)                            ;; 2..267 sender_address for addr_none would be 2 bits 00 --normally will be replaced by sender address
+    .store_slice(ad)                            ;; 2..267  0043800efd...73010  // destination address
+    .store_coins(1000)                          ;; 4..16(?)   // VarUInteger 16 (variable size)
+    .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 ) ;; extra-currencies (1), ihr-fee (4 for empty VarUInteger 16), fwd-fee (4), cur_lt (64), now (32) init (1)
+    .store_uint(1,1)              ;; inplace
+    .store_ref(body)
+  .end_cell();
+  var sfull = full.begin_parse();
+  ;; sfull~dump();
+
+
+  ;; We build stack using as signature of receiver:
+  ;;() recv_internal (int balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+
+  tuple pila = unsafe_tuple([
+      1000, ;; coins
+      10,  ;; msg_value
+      full, ;; in_msg_full
+      sbody   ;; msg_body
+  ]);
+
+cell data = begin_cell()             ;; initial data of contract
+      .store_uint(1, 32)              ;; seqno
+      .store_dict(new_dict())          ;; dictionary selling ads
+      .store_dict(new_dict())          ;; dictionary buying ads
+      .store_dict(new_dict())          ;; dictionary payments_buying_ads
+      .end_cell();
+
+
+  set_data(data);
+
+  var (int exit_code, int gas_usado1, return_values) = invoke_method_full(recv_internal, pila);
+ 
+  exit_code~dump();
+
+  throw_if(101, exit_code != 500);
+
+
+  return gas_usado1;
+}
+
+
+
+{- In ruby with gem rbnacl:
+
+TVM https://ton.org/docs/tvm.pdf sección 3.1.4 Standard Cell Representation
+3.1.5 hash(c) = sha256(cellrepr(c))
+
+     def get_binary_chunks(string, size)
+       Array.new(((string.length + size - 1) / size)) { |i| string.byteslice(i *
+         size, size) }
+     end
+
+     def bigint_a_repcadena(b)
+       bs = b.to_s(2)
+       r = bs.length % 8
+       if r != 0
+         bs = ("0" * (8-r)) + bs   # Alinea a 8 bits
+       end
+       get_binary_chunks(bs, 8).map {|bc| bc.to_i(2).chr}.join
+     end
+
+     def repcadena_a_bigint(c)
+       bin = c.bytes.map{|d| d.to_s(2)}.map{|b| b.rjust(8, '0')}.join
+       bin.to_i(2)
+     end
+ 
+     privatekey = "humildadhumildadhumildadhumildad"
+     signing_key = RbNaCl::Signatures::Ed25519::SigningKey.new(privatekey)
+     verify_key = signing_key.verify_key
+     pubkey = verify_key.to_s
+     pubkey_int = TonapiHelper::repcadena_a_bigint(pubkey) #--> Poner en contrato como llavepub 5740062228354721600754580252233606140907055746067690484183599933578057099980
+
+     message = "1234"
+     signature_str = signing_key.sign(message)
+     signature_bin = signature_str.bytes.map{|d| d.to_s(2)}.map{|b| b.rjust(8, '0')}.join  # 512 bits
+     s1 = signature_bin[0..255] # 256
+     s2 = signature_bin[256..511] # 256
+     s1.to_i(2) # --> Poner  en contrato como primera parte de firma de mensaje
+     s2.to_i(2) # --> Poner  en contrato como segunda parte de firma de mensaje
+
+
+     npubkey = 5740062228354721600754580252233606140907055746067690484183599933578057099980
+     sp1 = 47300610189336855665906212692912528851097198030868859904038081127710362113541
+     sp2 = 44514474220443181257327199275877108625102361313203556715578551325693283299846
+
+     pubkey2=bigint_a_repcadena(npubkey)
+
+     verify_key2 = RbNaCl::VerifyKey.new(pubkey2)
+     ss = bigint_a_repcadena(sp1) + bigint_a_repcadena(sp2)
+     verify_key2.verify(ss, message) # => true
+
+   -}

@@ -1,0 +1,17 @@
+// Sample message to send via toncli 
+// Changes manager's address
+
+"Asm.fif" include
+
+<b 
+
+2 32 u,
+123 64 u,
+"kQBtO0gynpAGdXQn0lyYL2QhhGQQ_4PHe2kIM50eSuP9NX7z" $>smca
+32 i,  
+256 u,
+32 i,
+
+b>
+
+

@@ -1,0 +1,368 @@
+{-
+	Validators in TON network are chosen onchain by special smart-contract called Elector: participants sends their application and smart-contract deterministically decides who will be the next validator. Your task is to implement (in simplified form) election logic in the gas-optimal way:
+	"Mini-elector" should accept internal messages with the following layout.
+		a) `participate#5ce28eea query_id:uint64 max_factor:uint24 = InternalMsgBody;`. Upon receiving this message contract should store sender of the message (called key), max_factor and amount of TON attached to message (called stake) to storage (if key already exists in the table max_factor should be rewritten to new one while amount should be added to previously processed). If maxfactor is less than 65536 it should be treated as equal to 65536, if maxfactor is higher than 655360 it should be treated as equal to 655360.
+		b) `try_elect#207fa5f5 query_id:uint64 = InternalMsgBody;` - upon receiving this message contract should try to form winners list (key, effective_stake) from participant' applications. Note that `effective_stake` may be less than `stake` (in other words, not all the stake will work). Excesses of the stake (as well as stakes of "losers", should be stored separately).
+		Rules of forming a list:
+			I) it has at least 5 rows
+			II) for each participant A in the list, the ratio of A's `effective_stake` to the `effective_stake` of participant with the smallest stake `effective_stake` should be equal or less to A's max_factor/65536 (in other words, max_factor is 65536 based rational number).
+			III) Under conditions I and II, total effective stake (sum of `effective_stake` of all winners) should be maximal.
+
+		If it is not possible to form a list, contract should throw.
+		Otherwise, it should respond with 
+		`success#eefa5ea4
+			query_id:uint64
+			total_winners:uint32
+			total_effective_stake:(VarUInteger 16)
+			unused_stake:(VarUInteger 16) = InternalMsgBody;`
+			(query_id matched that in try_elect)
+
+		After responding with `success` message, contract's get_method `get_stake_table` should return two tuples with winners and "unused funds", this tuples should contain exactly the same number of elements as there are winners/participants-with-unused-funds (NOT lisp-style lists), each element should be in format [address-as-a-slice, stake-as-number].  Note that if participants' stake is not fully used, it will be presented in both tuples. For instance, possible result of get_stake_table can be `
+		(["Ef8RERERERERERERERERERERERERERERERERERERERERERlb"a, 10], ["Ef8iIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiImKK"a, 1], 
+		 ["Ef8zMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM0vF"a, 1], ["Ef9ERERERERERERERERERERERERERERERERERERERERERJUo"a, 1], 
+		 ["Ef9VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVbxn"a, 1]),
+		(["Ef8RERERERERERERERERERERERERERERERERERERERERERlb"a, 10])`.
+		
+		Note that tests are organized as following: there will be a few participate requests (less than 255) followed by one try_elect and then response and get_method result will be checked.
+-}
+
+
+int tuple_len(tuple t) asm "TLEN";
+(tuple, int) ~tuple_pop(tuple t) asm "TPOP";
+
+
+;; 120 should be enough as the max size of VarUInteger 16
+const sorter_key_len = 128;
+const sorter_upper_bound = 85070591730234615865843651857942052864; ;; 2 ** 126
+const max_factor_denominator = 65536;
+
+
+;; participants: address_hashed -> stake(Grams), max_factor(uint24), sender_address(slice)
+;; NEW:
+;; ps = [stake(int), max_factor(int), address(slice)][]
+[int, int, slice] participant_tuple(int stake, int max_factor, slice address) inline {
+	return triple(stake, max_factor, address);
+}
+(int, int, slice) participant_break([int, int, slice] t) inline {
+	return untriple(t);
+}
+int i_stake(tuple t) inline {
+	return t.at(0);
+}
+int i_max_factor(tuple t) inline {
+	return t.at(1);
+}
+slice i_address(tuple t) inline {
+	return t.at(2);
+}
+
+(cell, cell, int, int) load_data() inline {
+	slice cs = get_data().begin_parse();
+
+	if (cs.slice_empty?()) {
+		return (new_dict(), new_dict(), -1, -1);
+	}
+
+	cell participants = cs~load_dict();
+	cell sorter = cs~load_dict();
+	int opt_count = cs~load_uint(32);
+	int opt_effective_total = cs~load_grams();
+	return (participants, sorter, opt_count, opt_effective_total);
+}
+
+() save_data(cell participants, cell sorter, int opt_count, int opt_effective_total) impure inline {
+	set_data(begin_cell()
+		.store_dict(participants)
+		.store_dict(sorter)
+		.store_uint(opt_count, 32)
+		.store_grams(opt_effective_total)
+		.end_cell()
+	);
+}
+
+(cell, int) udict_get_ref?fixed(cell dict, int key_len, int index) asm(index dict key_len) "DICTUGETREF" "NULLSWAPIFNOT";
+
+
+
+(tuple, int) sorter_to_participant_tuple(cell sorter) impure {
+	tuple ps = empty_tuple();
+	int total_stake = 0;
+	int stake = sorter_upper_bound;
+	;; Gas-Hook here: 7 302 090
+	;; int testCount = 100000;
+	;; int testI = 0;
+	;; while (testI < testCount) {
+	;; 	testI += 1;
+	;; }
+	;; stake += testI - testCount;
+
+	do {
+		(stake, slice sor_pre_list, int sor_f) = sorter.udict_get_prev?(sorter_key_len, stake);
+		
+		if (sor_f) {
+			cell sor_list = sor_pre_list.preload_ref();
+
+			int list_f = -1;
+			do {
+				slice list_cs = sor_list.begin_parse();
+				int stake = list_cs~load_grams();
+				int max_factor = list_cs~load_uint(24);
+				slice address = list_cs~load_msg_addr();
+
+				ps~tpush(participant_tuple(stake, max_factor, address));
+				total_stake += stake;
+
+				;; {
+				;; 	(int wc, int addr_hash) = parse_std_addr(address);
+				;; 	;; wc~dump();
+				;; }
+
+				if (list_cs.slice_refs_empty?()) {
+					list_f = 0;
+				} else {
+					sor_list = list_cs.preload_ref();
+				}
+			} until (~ list_f);
+		}
+	} until (~ sor_f);
+
+	;; Gas-Hook here: 7302082
+	;; int testCount = 100000;
+	;; int testI = 0;
+	;; while (testI < testCount) {
+	;; 	testI += 1;
+	;; }
+	;; stake += testI - testCount;
+
+	return (ps, total_stake);
+}
+
+(cell, tuple, int) sort_participants_into_tuple(cell participants) impure inline {
+	cell sorter = new_dict();
+
+	;; Gas-Hook here: 21 702 370
+	;; int testCount = 100000;
+	;; int testI = 0;
+	;; while (testI < testCount) {
+	;; 	testI += 1;
+	;; }
+	;; total_stake += testI - testCount;
+
+	int hash = -1;
+	do {
+		(hash, slice cs, int f) = participants.udict_get_next?(256, hash);
+		if (f) {
+			;; cs = stake(Grams), max_factor(uint24), sender_address(slice)
+			builder next_list = begin_cell()
+				;; .store_uint(hash, 256)
+				.store_slice(cs);
+			
+			int stake = cs~load_grams();
+			;; int max_factor = cs~load_uint(24);
+
+			;; {
+			;; 	slice addr = cs~load_msg_addr();
+			;; 	(int wc, int addr_hash) = parse_std_addr(addr);
+			;; 	wc~dump();
+			;; }
+
+			(cell sor_list, int sor_f) = sorter.udict_get_ref?fixed(sorter_key_len, stake);
+			if (sor_f) {
+				;; ~dump(next_list.end_cell());
+				next_list = next_list.store_ref(sor_list);
+				;; ~dump(next_list.end_cell());
+			}
+			;; sor_list~impure_touch();
+			;; sor_f~impure_touch();
+			
+			sorter~udict_set_ref(sorter_key_len, stake, next_list.end_cell());
+		}
+	} until (~ f);
+
+	(tuple ps, int total_stake) = sorter_to_participant_tuple(sorter);
+	return (sorter, ps, total_stake);
+}
+
+(int, int) optimize_effective_stake(tuple ps) impure {
+	int count = ps.tuple_len();
+	throw_if(555, count < 5);
+
+	;; opt = Optimal
+	int opt_effective_total = -1;
+	int opt_count = -1;
+
+	int li = 4; ;; Last Index
+	while (li < count) {
+		int cur_min_stake = ps.at(li).i_stake();
+
+		int cur_total = 0;
+		int i = 0;
+		while (i <= li) {
+			(int stake, int max_factor, _) = participant_break(ps.at(i));
+			int effective_stake = min(
+				stake,
+				cur_min_stake * max_factor / max_factor_denominator
+			);
+			cur_total += effective_stake;
+
+			i += 1;
+		}
+
+		li += 1;
+		if (cur_total > opt_effective_total) {
+			opt_effective_total = cur_total;
+			opt_count = li; ;; It's already incremented to contain count
+		} else {
+			int proceed_skipping = true;
+			while ((li < count) & proceed_skipping) {
+				;; Computing "upper bound" heuristic:
+				;; if even this upper bound is <= opt_effective_total
+				;; then there is no need to recompute it properly from scratch
+				cur_total += ps.at(li).i_stake(); 
+				if (cur_total > opt_effective_total) { proceed_skipping = false; }
+				else { li += 1; }
+			}
+		}
+	}
+
+	return (opt_count, opt_effective_total);
+}
+
+;; testable
+() recv_internal (int msg_value, cell full_message, slice in_msg_body) {
+	;; return ();
+	slice header_cs = full_message.begin_parse().skip_bits(4);
+	slice sender = header_cs~load_msg_addr();
+	;; (int sender_wc, int sender_hash) = sender.parse_std_addr(); ;; !! Sketchy, might not be correct
+	;; throw_unless(66, sender_wc == -1);
+	int sender_hashed = sender.slice_hash();
+
+	(int op, int query_id) = (in_msg_body~load_uint(32), in_msg_body~load_uint(64));
+
+	(cell participants, _, _, _) = load_data();
+
+	if(op == 0x5ce28eea) { ;; participate
+		(slice cs, int f) = participants.udict_get?(256, sender_hashed);
+		
+		int stake = 0;
+		if (f) {
+			stake = cs~load_grams();
+			;; max_factor is going to be overwritten anyway
+			;; sender stays same
+		}
+		stake += msg_value;
+
+		int max_factor = in_msg_body~load_uint(24);
+		if (max_factor < 65536) { max_factor = 65536; }
+		elseif (max_factor > 655360) { max_factor = 655360; }
+
+		participants~udict_set_builder(
+			256, sender_hashed,
+			begin_cell().store_grams(stake).store_uint(max_factor, 24).store_slice(sender)
+		);
+
+		save_data(participants, null(), 0, 0);
+	}
+
+	if(op == 0x207fa5f5) { ;; try_elect
+		;; Gas-Hook here: 21 702 558
+
+		(cell sorter, tuple ps, int total_stake) = sort_participants_into_tuple(participants);
+
+		;; Gas-Hook here: 7 302 126
+		;; int testCount = 100000;
+		;; int testI = 0;
+		;; while (testI < testCount) {
+		;; 	testI += 1;
+		;; }
+		;; query_id += testI - testCount;
+
+		(int opt_count, int opt_effective_total) = optimize_effective_stake(ps);
+
+		;; (ps, total_stake) = sort_participants_into_tuple(participants);
+		;; (opt_count, opt_effective_total) = optimize_effective_stake(ps);
+
+		;; Gas-Hook here: 101 910
+
+		var msg = begin_cell()
+			.store_uint(0x18, 6)
+			.store_slice(sender)
+			.store_coins(0)
+			.store_uint(1, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+			.store_ref(
+				begin_cell()
+				.store_uint(0xeefa5ea4, 32) ;; success op_code
+				.store_uint(query_id, 64)
+				.store_uint(opt_count, 32)
+				.store_grams(opt_effective_total)
+				.store_grams(total_stake - opt_effective_total) ;; unused_stake
+				.end_cell()
+			)
+			.end_cell();
+		send_raw_message(msg, 64);
+
+		save_data(participants, sorter, opt_count, opt_effective_total);
+	}
+}
+
+;; slice hash_to_address(int hash) {
+;; 	return begin_cell()
+;; 		.store_uint(4, 3)
+;; 		.store_int(-1, 8)
+;; 		.store_uint(hash, 256)
+;; 	.end_cell().begin_parse();
+;; }
+
+[slice, int] answer_entry(slice address, int amount) inline {
+	return [address, amount];
+}
+
+forall X -> tuple tuple_from_one(X x) asm "SINGLE";
+;; testable
+(tuple, tuple) get_stake_table() method_id {
+	;; return (tuple_from_one(45), tuple_from_one(56));
+	;; return (empty_tuple(), empty_tuple());
+
+	(_, cell sorter, int opt_count, int opt_effective_total) = load_data();
+
+	(tuple ps, int total_stake) = sorter_to_participant_tuple(sorter);
+	;; sort_participants_into_tuple(participants);
+
+	;; (int opt_count, int opt_effective_total) = optimize_effective_stake(ps);
+	;; ^ Load "opt_count" and "opt_effective_total" from storage instead
+
+	;;(ps, total_stake) = sort_participants_into_tuple(participants);
+	;; (opt_count, opt_effective_total) = optimize_effective_stake(ps);
+	int count = ps.tuple_len();
+
+	;; ps~dump();
+
+	int cur_min_stake = ps.at(opt_count - 1).i_stake();
+
+	tuple winners = empty_tuple();
+	tuple unused = empty_tuple();
+
+	int i = 0;
+	while (i < opt_count) {
+		(int stake, int max_factor, slice address) = participant_break(ps.at(i));
+
+		int max_allowed_stake = cur_min_stake * max_factor / max_factor_denominator;
+		if (max_allowed_stake >= stake) {
+			winners~tpush(answer_entry(address, stake));
+		} else {
+			winners~tpush(answer_entry(address, max_allowed_stake));
+			;; unused~tpush(answer_entry(address, max_allowed_stake));
+			unused~tpush(answer_entry(address, stake - max_allowed_stake));
+		}
+
+		i += 1;
+	}
+
+	while (i < count) {
+		(int stake, _, slice address) = participant_break(ps.at(i));
+		unused~tpush(answer_entry(address, stake));
+		i += 1;
+	}
+
+	return (winners, unused);
+}

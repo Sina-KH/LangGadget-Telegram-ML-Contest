@@ -1,0 +1,3 @@
+/media/psf/LangGadget/04_LangGadgetLib/build/CMakeFiles/rebuild_cache.dir
+/media/psf/LangGadget/04_LangGadgetLib/build/CMakeFiles/tglang.dir
+/media/psf/LangGadget/04_LangGadgetLib/build/CMakeFiles/edit_cache.dir

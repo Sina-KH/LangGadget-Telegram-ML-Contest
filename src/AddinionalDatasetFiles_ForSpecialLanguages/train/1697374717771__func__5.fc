@@ -1,0 +1,95 @@
+{-
+
+  TASK 5 - Address encoder
+  Write the method that for any valid MsgAddressInt with addr_std constructor
+  without anycast
+  (see https://github.com/ton-blockchain/ton/blob/master/crypto/block/block.tlb#L105)
+ returns the slice that contain ASCII encoded base64url user-friendly bouncable
+ address (without test-only flag), see https://ton.org/docs/#/howto/step-by-step?id=_1-smart-contract-addresses
+-}
+
+() recv_internal() {
+}
+
+(builder, ()) enrich_with_crc16(builder data) {
+  ;; https://github.com/toncenter/tonweb/blob/master/src/utils/Utils.js#L169
+  
+  slice cs = data
+    .store_uint(0, 16)
+    .end_cell().begin_parse();
+
+  int poly = 0x1021;
+  int reg = 0;
+  while (cs.slice_bits() > 0) {
+    int byte = cs~load_uint(8);
+    int mask = 0x80;
+    while (mask > 0) {
+      reg <<= 1;
+      if (byte & mask) {
+        reg += 1;
+      }
+      mask >>= 1;
+      if (reg > 0xffff) {
+        reg &= 0xffff;
+        reg ^= poly;
+      }
+    }
+  }
+  data~store_uint(reg, 16);
+  return (data, ());
+}
+
+cell base64encode(builder data) {
+  data~store_uint(0, 5);
+  slice cs = data.end_cell().begin_parse();
+
+  builder res = begin_cell();
+  while (cs.slice_bits() >= 6) {
+    int chunk = cs~load_uint(6);
+    if (chunk < 26) {
+      res~store_uint(65 + chunk, 8); ;; A+
+    } elseif (chunk < 52) {
+      res~store_uint(97 + chunk - 26, 8); ;; a+
+    } elseif (chunk < 62) {
+      res~store_uint(48 + chunk - 52, 8); ;; 0+
+    } elseif (chunk == 62) {
+      res~store_uint(45, 8); ;; -
+    } else {
+      res~store_uint(95, 8); ;; _
+    }
+  }
+
+  if (cs.slice_bits() == 1) {
+    res~store_uint(61, 8); ;; =
+    res~store_uint(61, 8); ;; =
+  } elseif (cs.slice_bits() == 3) {
+    res~store_uint(61, 8); ;; =
+  }
+
+  return res.end_cell();
+}
+
+;; testable
+(slice) encode_address(slice Address) method_id {
+  slice cs = Address;
+  cs~skip_bits(2); ;; addr_std$10
+  cs~skip_bits(1); ;; (Maybe Anycast)
+  int wc = cs~load_int(8);
+  slice addr = cs~load_bits(256);
+
+  builder bytes = begin_cell()
+    .store_uint(0x11, 8)
+    .store_int(wc, 8)
+    .store_slice(addr);
+  bytes~enrich_with_crc16();
+
+  return base64encode(bytes).begin_parse();
+}
+
+;; Because ton-contract-executor can't pass in Slices to get methods
+;; (or at least it is nowhere documented)
+cell for_self_testing(cell address) method_id {
+  return begin_cell()
+    .store_slice(encode_address(address.begin_parse()))
+    .end_cell();
+}

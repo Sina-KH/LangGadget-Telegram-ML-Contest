@@ -1,0 +1,38 @@
+"TonUtil.fif" include
+
+variable key
+-1 key !
+
+variable addr_ton_dict
+dictnew addr_ton_dict !
+
+64 =: int_len
+
+{ 
+    bl word 
+    parse-smc-addr
+    drop 
+    <b 
+      -rot 
+      Addr,
+      swap 
+      int_len u, 
+      key 1+! 
+      key @ addr_ton_dict 
+      @ int_len 
+
+    b>udict!+ 
+    drop 
+    addr_ton_dict ! 
+
+} : ADD_ADDR_AND_TON
+
+100000000 ADD_ADDR_AND_TON EQD57OL7n9KjwN5vxrW5KOJ-WIQTEw85mSMXmkdcSS_eLzi7
+200000000 ADD_ADDR_AND_TON kQBpUI-XEjEqRheeV8TYclbXqOBSTfdRlOzGmZtQuJUuNxWo
+
+<b
+    66 32 u,
+    0 64 u,
+    b{1} s,
+    addr_ton_dict @ ref,
+b>

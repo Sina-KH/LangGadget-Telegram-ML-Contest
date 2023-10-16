@@ -1,0 +1,622 @@
+{-
+
+  TASK 3 - Message validation.
+  Write the method that checks that cell contains valid message
+  in accordance to https://github.com/ton-blockchain/ton/blob/master/crypto/block/block.tlb#L155
+  Note, tests will only cover valid and invalid MessageAny objects,
+  valid MessageRelaxed (which are not simultaneously MessageAny) will not be presented
+  If message is invalid for any reason - method should return (0, null), otherwise
+  it should return (-1, [slice src, slice dest, int amount] ), where src, dest and
+  amount represents source of the message, destination of the message and attached
+  amount of TONs. If any of those values are not presented (or presented as
+  addr_none slice) in the message cell - they should be substituted with null.
+  It is guaranteed that for all tests any HashmapE datatype in message structure
+  is empty hashmaps (has hme_empty constructor).
+  Documentation on TL-B schemes can be found in https://ton.org/docs/#/overviews/TL-B
+-}
+
+() recv_internal() {
+}
+
+;; TL-B VALIDATE HELPERS
+
+(slice, slice, int) get_check_addr1?(slice cs) inline_ref {
+;;    (addr_type_src == 1 )
+;;  addr_extern$01 len:(## 9) external_address:(bits len)
+;;  = MsgAddressExt;
+    if (cs.slice_bits() < 10) {
+        return (null(), null(), 0);
+    }
+    int addr_len = cs~load_uint(9);
+    if (cs.slice_bits() < addr_len) {
+        return (null(), null(), 0);
+    }
+    int intsrc = cs~load_uint(addr_len);
+    slice addr = begin_cell()
+            .store_uint(1, 2) ;;addr_extern$01
+            .store_uint(addr_len, 9) ;; addr_len
+            .store_uint(intsrc, addr_len) ;; addr
+            .end_cell()
+            .begin_parse();
+    return (cs, addr, -1);
+}
+
+(slice, slice, int) get_check_addr2?(slice cs) inline_ref {
+;; anycast_info$_ depth:(#<= 30) { depth >= 1 }
+;;          rewrite_pfx:(bits depth) = Anycast;
+;; addr_std$10 anycast:(Maybe Anycast)
+;; workchain_id:int8 address:bits256  = MsgAddressInt;
+    if (cs.slice_bits() < (8 + 256)) {
+        return (null(), null(), 0);
+    }
+
+    int anycast = cs~load_uint(1);
+
+
+    builder bsrc = begin_cell()
+            .store_uint(2, 2) ;; addr_std$10
+            .store_uint(anycast, 1); ;; anycast nothing
+
+    if (anycast == 1)
+    {
+        int depth = cs~load_uint(32);
+
+        if (cs.slice_bits() < depth) {
+            return (null(), null(), 0);
+        }
+        slice scast = cs~load_bits(depth);
+        bsrc.store_uint(depth, 32).store_slice(scast); ;;writing anycast
+    }
+
+    int wc = cs~load_int(8);
+    int srcint = cs~load_uint(256);
+    ;;return (null(), null(), -1);
+    slice addr = bsrc.store_int(wc, 8)
+        .store_uint(srcint, 256)
+        .end_cell()
+        .begin_parse();
+
+    return (cs, addr, -1);
+}
+
+(slice, slice, int) get_check_addr3?(slice cs) inline_ref {
+;;  (addr_type == 3)
+;;     anycast_info$_ depth:(#<= 30) { depth >= 1 }
+;;             rewrite_pfx:(bits depth) = Anycast;
+;;  addr_var$11 anycast:(Maybe Anycast) addr_len:(## 9)
+;;  workchain_id:int32 address:(bits addr_len) = MsgAddressInt;
+    if (cs.slice_bits() < 42 ) {
+        return (null(), null(), 0);
+    }
+    int anycast = cs~load_uint(1);
+
+    builder baddr = begin_cell()
+            .store_uint(3,2) ;; addr_var$11
+            .store_uint(anycast, 1);
+
+    if (anycast == 1) {
+        int depth = cs~load_uint(32);
+        if (cs.slice_bits() < (depth + 9 + 1)) {
+            return (null(), null(), 0);
+        }
+        slice scast = cs~load_bits(depth);
+        baddr.store_uint(depth, 32).store_slice(scast); ;;writing anycast
+    }
+
+    int addr_len = cs~load_uint(9);
+    int wc = cs~load_int(32);
+
+    if (cs.slice_bits() < addr_len ) {
+        return (null(), null(), 0);
+    }
+    int intsrc = cs~load_uint(addr_len);
+    slice addr = baddr.store_uint(addr_len, 9) ;; addr_len
+            .store_uint(intsrc, addr_len)
+            .end_cell()
+            .begin_parse();
+
+    return (cs, addr, -1);
+
+}
+
+(slice, int, int) get_check_grams?(slice cs) inline_ref {
+    int grams = null();
+    if (cs.slice_bits() < 4) { ;; varuinteger16 -> length(depth) = log2(16) = 4;
+        return (null(), grams, 0);
+    }
+    int glen = cs~load_uint(4); ;; len
+    if (glen == 0) {
+        return (cs, grams, -1);
+    } ;;0 grams
+    if (cs.slice_bits() < (glen * 8) ) {
+        return (null(), grams, 0);
+    }
+    grams = cs~load_uint(glen * 8);
+    return (cs, grams, -1);
+}
+
+(slice, int) get_check_state_init?(slice cs) inline_ref {
+;;     tick_tock$_ tick:Bool tock:Bool = TickTock;
+
+;;     _ split_depth:(Maybe (## 5)) special:(Maybe TickTock)
+;;         code:(Maybe ^Cell) data:(Maybe ^Cell)
+;;         library:(HashmapE 256 SimpleLib) = StateInit;
+    if (cs.slice_bits() < 1) {
+        return (null(), 0);
+    }
+    int maybe_flag0 = cs~load_uint(1);
+
+    if (maybe_flag0 == 0){
+        return (cs, -1);
+    }
+
+    int either_flag = cs~load_uint(1);
+    if (either_flag == 1) {
+        if (slice_refs_empty?(cs)) {
+            return (null(), 0);
+        }
+        else {
+            cell statecell = cs~load_ref(); ;;TODO stateinit ref checker
+        }
+    }
+
+    int maybe_flag1 = cs~load_uint(1);
+
+    if (maybe_flag1 == 1) {
+        if (cs.slice_bits() < 5) {
+            return (null(), 0);
+        }
+        int depth = cs~load_uint(5);
+    }
+
+    if (cs.slice_bits() < 1) {
+        return (null(), 0);
+    }
+
+    int maybe_flag2 = cs~load_uint(1);
+
+    if (maybe_flag2 == 1) {
+        if (cs.slice_bits() < 2) {
+            return (null(), 0);
+        }
+        int TickTock = cs~load_uint(2);
+    }
+
+    if (cs.slice_bits() < 1) {
+        return (null(), 0);
+    }
+
+    int maybe_flag3 = cs~load_uint(1);
+
+    if (maybe_flag3 == 1) {
+        if (slice_refs_empty?(cs)) {
+            return (null(), 0);
+        }
+        cell code = cs~load_ref();
+        if (code.begin_parse().slice_bits() < 1) {
+            return (null(), 0);
+        }
+    }
+
+    if (cs.slice_bits() < 1) {
+        return (null(), 0);
+    }
+
+    int maybe_flag4 = cs~load_uint(1);
+
+    if (maybe_flag4 == 1) {
+        if (slice_refs_empty?(cs)) {
+            return (null(), 0);
+        }
+
+        cell data = cs~load_ref();
+        if (data.begin_parse().slice_bits() < 1) {
+            return (null(), 0);
+        }
+    }
+    return (cs, -1);
+}
+
+(slice, int) get_check_msg_body?(slice cs) inline_ref {
+    ;;body:(Either X ^X)
+    if (cs.slice_bits() < 1) {
+        return (null(), 0);
+    }
+
+    int maybe0 = cs~load_uint(1);
+    if (maybe0 == 0) {
+        return (cs, -1);
+    }
+
+    int either_flag = cs~load_uint(1);
+
+    if (either_flag == 1) {
+        if (cs.slice_bits() < 1) {
+            return (null(), 0);
+        }
+    }
+    else {
+        if (slice_refs_empty?(cs)) {
+            return (null(), 0);
+        }
+        cell body = cs~load_ref();
+        if (body.begin_parse().slice_bits() < 1) {
+            return (null(), 0);
+        }
+    }
+    return (cs, -1);
+}
+
+
+;; testable
+(int, tuple) validate_message(cell message) method_id {
+
+    var invalid_message = (0, null());
+
+    slice src = null();
+    slice dst = null();
+    int fa = 0;
+    slice anc = null();
+    int depth = 0;
+    int grams = null();
+
+    slice cs = message.begin_parse();
+    int totall = cs.slice_bits();
+    if ( message.cell_null?() | (cs.slice_bits() < 2))
+    {
+        return invalid_message;
+    }
+
+    int msgtype = cs~load_uint(1);
+
+    if (msgtype == 0)
+    ;; internal message
+    ;; CommonMsgInfo - int_msg_info$0
+    ;;int_msg_info$0 ihr_disabled:Bool bounce:Bool bounced:Bool
+    ;;src:MsgAddressInt dest:MsgAddressInt
+    ;;value:CurrencyCollection ihr_fee:Grams fwd_fee:Grams
+    ;;created_lt:uint64 created_at:uint32 = CommonMsgInfo;
+
+    ;;message$_ {X:Type} info:CommonMsgInfo
+    ;;init:(Maybe (Either StateInit ^StateInit))
+    ;;body:(Either X ^X) = Message X;
+    {
+
+        if (cs.slice_bits() < 6) {
+            return invalid_message;
+        }
+        var flags = cs~load_uint(3);
+        ;; (anycast src dst)
+
+
+        {-SRC reading-}
+        int addr_type_src = cs~load_uint(2);
+        if (addr_type_src == 2) {
+            ;;int onebit = cs~load_uint(1);
+
+    ;;      addr_std$10 anycast:(Maybe Anycast)
+    ;;      workchain_id:int8 address:bits256  = MsgAddressInt;
+              (cs, src, fa)  = get_check_addr2?(cs);
+            ;;grams = cs.preload_uint(2);
+            ;;return (fa, unsafe_tuple([src, dst, grams])); ;;debug
+
+        }
+        elseif (addr_type_src == 3) {
+
+;;           addr_var$11 anycast:(Maybe Anycast) addr_len:(## 9)
+;;           workchain_id:int32 address:(bits addr_len) = MsgAddressInt;
+             (cs, src, fa)  = get_check_addr3?(cs);
+        }
+        else {
+            return invalid_message; ;; wrong addr type
+        }
+
+        if (~ fa) {
+            return invalid_message; ;; got wrong data in addr checker
+
+        }
+
+        {-DST reading-}
+        if (cs.slice_bits() < 6) {
+            return invalid_message;
+        }
+        int addr_type_dst = cs~load_uint(2);
+        if (addr_type_src == 2) {
+;;          addr_std$10 anycast:(Maybe Anycast)
+;;          workchain_id:int8 address:bits256  = MsgAddressInt;
+;;             return (fa, unsafe_tuple([dst, cs]));
+            (cs, dst, fa)  = get_check_addr2?(cs);
+            ;;return (fa, unsafe_tuple([dst]));
+;;             return (fa, unsafe_tuple([src, dst, grams])); ;;debug
+
+
+        }
+        elseif (addr_type_src == 3) {
+;;           addr_var$11 anycast:(Maybe Anycast) addr_len:(## 9)
+;;           workchain_id:int32 address:(bits addr_len) = MsgAddressInt;
+            (cs, dst, fa)  = get_check_addr3?(cs);
+        }
+        else {
+            return invalid_message; ;; wrong addr type
+        }
+
+        if (~ fa) {
+            return invalid_message; ;; got wrong data in addr checker
+        }
+
+
+
+;;     var_uint$_ {n:#} len:(#< n) value:(uint (len * 8))
+;;     = VarUInteger n;
+;;     var_int$_ {n:#} len:(#< n) value:(int (len * 8))
+;;     = VarInteger n;
+;;     nanograms$_ amount:(VarUInteger 16) = Grams;
+;;     //
+;;     extra_currencies$_ dict:(HashmapE 32 (VarUInteger 32))
+;;     = ExtraCurrencyCollection;
+;;     currencies$_ grams:Grams other:ExtraCurrencyCollection
+;;     = CurrencyCollection;
+;;     currencycollection ~= 4 + 4 + 4 + 1
+
+
+
+
+        if (cs.slice_bits() < 13 ){
+            return invalid_message;
+        }
+
+        (cs, grams, fa) = get_check_grams?(cs);
+        ;;return (fa, unsafe_tuple([src, dst, grams])); ;;debug
+
+
+        if (~ fa) {
+            return invalid_message;
+        }
+        ;;return(-1, unsafe_tuple([src, dst, grams]));
+;;         int extraint = cs~load_uint(1); ;;extra_currencies tag $0
+;;         if (extraint != 0 ) {
+;;             return invalid_message;
+;;         }
+        cs = cs.skip_dict(); ;; extra_currencies dict
+
+        int ihr_fee = 0;
+        int fwd_fee = 0;
+        (cs, ihr_fee, fa) = get_check_grams?(cs);
+        if (~ fa) {
+            return invalid_message;
+        }
+
+
+        (cs, fwd_fee, fa) = get_check_grams?(cs);
+        if (~ fa) {
+            return invalid_message;
+        }
+
+        ;;return (fa, unsafe_tuple([src, dst, grams])); ;;debug
+        ;;created_lt:uint64 created_at:uint32
+
+        if (cs.slice_bits() < 96) {
+            return invalid_message;
+        }
+
+        int created_lt = cs~load_uint(64);
+        int created_at = cs~load_uint(32);
+
+
+
+
+
+
+        ;;init:(Maybe (Either StateInit ^StateInit))
+        ;;body:(Either X ^X) = Message X;
+;;     tick_tock$_ tick:Bool tock:Bool = TickTock;
+;;
+;;     _ split_depth:(Maybe (## 5)) special:(Maybe TickTock)
+;;         code:(Maybe ^Cell) data:(Maybe ^Cell)
+;;         library:(HashmapE 256 SimpleLib) = StateInit;
+        (cs, fa) = get_check_state_init?(cs);
+;;         return (fa, unsafe_tuple([src, dst, grams])); ;;debug
+        if (~ fa) {
+            return invalid_message;
+        }
+;;         fa = cs~load_uint(1);
+;;         return (fa, unsafe_tuple([src, dst, grams])); ;;debug
+
+        (cs, fa) = get_check_msg_body?(cs);
+        if (~ fa) {
+            return invalid_message;
+        }
+    }
+
+    elseif(msgtype == 1)
+    ;; external in message ext -> int
+    ;;ext_in_msg_info$10 src:MsgAddressExt dest:MsgAddressInt
+    ;;import_fee:Grams = CommonMsgInfo;
+
+    ;;message$_ {X:Type} info:CommonMsgInfo
+    ;;init:(Maybe (Either StateInit ^StateInit))
+    ;;body:(Either X ^X) = Message X;
+    {
+
+        int ext_type = cs~load_uint(1);
+        if ( ext_type == 0)
+        {
+            {-ext in SRC -}
+;;          addr_none$00 = MsgAddressExt;
+;;          addr_extern$01 len:(## 9) external_address:(bits len)
+;;              = MsgAddressExt;
+            if (cs.slice_bits() < 2){
+                return invalid_message;
+            }
+            int addr_type_src = cs~load_uint(2);
+            if (addr_type_src == 0)
+    ;;      addr_none$00 = MsgAddressExt;
+            {
+                src = null();
+
+            }
+            elseif (addr_type_src == 1 )
+            ;;          addr_extern$01 len:(## 9) external_address:(bits len)
+            ;;              = MsgAddressExt;
+            {
+                (cs, src, fa) = get_check_addr1?(cs);
+                if (~ fa) {
+                    return invalid_message; ;;wrong addres from checker
+                }
+            }
+
+            {-ext in DST-}
+;;             anycast_info$_ depth:(#<= 30) { depth >= 1 }
+;;                 rewrite_pfx:(bits depth) = Anycast;
+;;                         addr_std$10 anycast:(Maybe Anycast)
+;;                 workchain_id:int8 address:bits256  = MsgAddressInt;
+;;                 addr_var$11 anycast:(Maybe Anycast) addr_len:(## 9)
+;;                 workchain_id:int32 address:(bits addr_len) = MsgAddressInt;
+            if (cs.slice_bits() < 2){
+                return invalid_message;
+            }
+
+
+            int addr_type_dst = cs~load_uint(2);
+
+            if (addr_type_dst == 2) {
+                ;;          addr_std$10 anycast:(Maybe Anycast)
+                ;;          workchain_id:int8 address:bits256  = MsgAddressInt;
+                (cs, dst, fa)  = get_check_addr2?(cs);
+;;                 throw(55);
+
+            }
+            elseif (addr_type_dst == 3) {
+                ;;           addr_var$11 anycast:(Maybe Anycast) addr_len:(## 9)
+                ;;           workchain_id:int32 address:(bits addr_len) = MsgAddressInt;
+                (cs, dst, fa)  = get_check_addr3?(cs);
+            }
+            else {
+                return invalid_message; ;; wrong addr type
+            }
+
+            if (~ fa) {
+                return invalid_message; ;; got wrong data in addr checker
+            }
+
+            ;;import_fee:Grams
+            int import_fee = 0;
+
+            (cs, import_fee, fa) = get_check_grams?(cs);
+
+            if (~ fa) {
+                return invalid_message;
+            }
+
+            (cs, fa) = get_check_state_init?(cs);
+
+            if (~ fa) {
+                return invalid_message;
+            }
+
+            (cs, fa) = get_check_msg_body?(cs);
+;;             return (fa, unsafe_tuple([src, dst, grams])); ;;debug
+            if (~ fa) {
+                return invalid_message;
+            }
+
+
+
+        }
+        elseif (ext_type == 1)
+        ;; external out message int -> ext
+        ;; ext_out_msg_info$11 src:MsgAddressInt dest:MsgAddressExt
+        ;; created_lt:uint64 created_at:uint32 = CommonMsgInfo;
+
+        ;;message$_ {X:Type} info:CommonMsgInfo
+        ;;init:(Maybe (Either StateInit ^StateInit))
+        ;;body:(Either X ^X) = Message X;
+        {
+            {-SRC external out-}
+;;             anycast_info$_ depth:(#<= 30) { depth >= 1 }
+;;                 rewrite_pfx:(bits depth) = Anycast;
+;;                         addr_std$10 anycast:(Maybe Anycast)
+;;                 workchain_id:int8 address:bits256  = MsgAddressInt;
+;;                 addr_var$11 anycast:(Maybe Anycast) addr_len:(## 9)
+;;                 workchain_id:int32 address:(bits addr_len) = MsgAddressInt;
+            if (cs.slice_bits() < 2){
+                return invalid_message;
+            }
+
+            int addr_type_src = cs~load_uint(2);
+            if (addr_type_src == 2) {
+                ;;      addr_std$10 anycast:(Maybe Anycast)
+                ;;      workchain_id:int8 address:bits256  = MsgAddressInt;
+                (cs, src, fa)  = get_check_addr2?(cs);
+
+            }
+            elseif (addr_type_src == 3) {
+                ;;           addr_var$11 anycast:(Maybe Anycast) addr_len:(## 9)
+                ;;           workchain_id:int32 address:(bits addr_len) = MsgAddressInt;
+                (cs, src, fa)  = get_check_addr3?(cs);
+            }
+            else {
+                return invalid_message; ;; wrong addr type
+            }
+
+            if (~ fa) {
+                return invalid_message; ;; got wrong data in addr checker
+            }
+
+
+
+            {-DST external out-}
+            ;;          addr_none$00 = MsgAddressExt;
+            ;;          addr_extern$01 len:(## 9) external_address:(bits len)
+            ;;               = MsgAddressExt;
+            if (cs.slice_bits()< 2) {
+                return invalid_message;
+            }
+            int addrtype = cs~load_uint(2);
+            if (addrtype == 0)
+            {
+    ;;          addr_none$00 = MsgAddressExt;
+                dst = null();
+            }
+            elseif (addrtype == 1 )
+;;          addr_extern$01 len:(## 9) external_address:(bits len)
+;;              = MsgAddressExt;
+            {
+                (cs, dst, fa) = get_check_addr1?(cs);
+                if (~ fa) {
+                    return invalid_message; ;;wrong addres from checker
+                }
+            }
+            else {
+                return invalid_message; ;; wrong addr type
+            }
+
+            ;; created_lt:uint64 created_at:uint32
+
+            if (slice_bits(cs) < 96) {
+                return invalid_message;
+            }
+
+            int create_lt = cs~load_uint(64);
+            int created_at = cs~load_uint(32);
+
+
+
+
+            (cs, fa) = get_check_state_init?(cs);
+            if (~ fa) {
+                return invalid_message;
+            }
+
+            (cs, fa) = get_check_msg_body?(cs);
+            if (~ fa) {
+                return invalid_message;
+            }
+
+        }
+
+        else { throw(64); } ;; impossible case
+
+    }
+    return (-1, unsafe_tuple([src, dst, grams]));
+}

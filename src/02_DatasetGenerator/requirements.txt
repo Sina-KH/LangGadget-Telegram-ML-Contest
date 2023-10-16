@@ -1,0 +1,6 @@
+chardet
+guesslang
+matplotlib
+pandas
+PyYAML
+requests

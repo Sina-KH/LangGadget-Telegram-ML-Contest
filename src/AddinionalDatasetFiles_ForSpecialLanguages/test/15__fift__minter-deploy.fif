@@ -1,0 +1,92 @@
+"TonUtil.fif"   include
+"GetOpt.fif"    include
+"Asm.fif"       include
+
+{ show-options-help 1 halt } : usage 0 =: t-flag
+{ { +" " } 7 times } : my-tab
+
+begin-options
+    "<max-supply> <max-ico> <price> <end-time> <owner-addr> <matadata-url> [--testnet]"  +cr +cr my-tab
+    +"Prepares deploy message of the minter-ico smart contract"  +cr my-tab
+    disable-digit-options generic-help-setopt
+
+    "t" "--testnet" { 2 =: t-flag } short-long-option
+        "Displays addresses with the testnet-only flag (+2)" option-help
+    "h" "--help" { usage } short-long-option
+        "Shows a help message" option-help
+parse-options
+
+$# 6 <> ' usage if
+
+0 =: workchain-id
+
+$1 $>GR =: max-supply
+$2 $>GR =: max-ico
+$3 $>GR =: price
+$4 parse-int =: end-time
+$5 parse-smc-addr drop 2=: owner-addr
+$6 =: matadata-url
+
+max-ico max-supply > abort"max-ico can't be more than max-supply"
+
+<{  SETCP0 ACCEPT
+    "auto/btn-mint-ico.func.code.fif" include PUSHREF SETCODE
+}>c =: minter-code
+
+"auto/btn-jwallet.func.code.fif" include =: jwallet-code
+
+<b  // offchain metadata
+    0x01 8 u, 
+    matadata-url $,
+b>  =: full-content
+
+<b 
+    <b                      // <-- main_data
+        owner-addr Addr,    // db::owner
+        0 Gram,             // db::simple_minted
+        max-supply Gram,    // db::allow_to_mint
+        0 Gram,             // db::simple_burned
+    b> ref,
+    <b                      // <-- ico_data
+        price Gram,         // db::ico_price
+        now 32 u,           // db::ico_start_time
+        end-time 32 u,      // db::ico_tstop_time
+        0 Gram,             // db::toico_minted
+        max-ico Gram,       // db::allow_to_ico
+    b> ref,
+    <b                      // <-- sys_data
+        jwallet-code ref,   // db::wall_code
+        full-content ref,   // db::content
+    b> ref,
+b>  =: init-storage
+
+<b
+    b{0011} s,   // split_depth:0 special:0 code:1 data:1
+    minter-code ref,
+    init-storage ref,
+    null dict,   // library
+b>  =: state-init
+
+state-init hashu workchain-id swap 2=: smc-addr
+
+."new smc address:                        " smc-addr             .addr cr
+."non-bounceable address (for init):      " smc-addr  t-flag 5 + .Addr cr
+."bounceable address (for later access):  " smc-addr  t-flag 4 + .Addr cr
+
+<b
+    b{10} s,        // ext_in_msg_info$10
+    b{00} s,        // src:MsgAddressExt (addr_none$00)
+    smc-addr Addr,  // dest:MsgAddressInt
+    0 Gram,         // import_fee:Grams
+b>  =: common-msg-info
+
+<b  // Message X
+    common-msg-info <s s,
+    b{1} s,    // init:  "1" Maybe bit
+    b{0} s,    // Either "0" bit
+    state-init <s s,
+    b{0} s, // body:  "0" Either bit
+b> 2 boc+>B
+
+"auto/init.boc" tuck B>file
+."saved smc creating query to file: " type cr

@@ -1,0 +1,161 @@
+;; Jettons discoverable smart contract
+int minimal_balance() asm "10000000 PUSHINT"; ;; 0.01 TON
+int gas_consumption() asm "10000000 PUSHINT";
+
+;; addr_none$00 = MsgAddressExt;
+slice null_address() asm "b{00} PUSHSLICE";
+
+;; storage scheme
+;; storage#_ total_supply:Coins = Storage;
+
+int get_total_supply() inline {
+    slice ds = get_data().begin_parse();
+    return ds~load_coins();
+}
+
+() set_total_supply(int total_supply) impure inline {
+    set_data(begin_cell()
+            .store_coins(total_supply)
+            .end_cell()
+    );
+}
+
+cell internal_transfer::build_message(cell body, int amount, slice recipient) inline {
+    cell state_init = jetton_wallet:create_state_init(recipient, my_address(), jetton_wallet_code());
+    slice recipient_wallet_address = calculate_contract_address(state_init);
+
+    return begin_cell()
+            .store_uint(msg_flag:bounceable(), 6)
+            .store_slice(recipient_wallet_address)
+            .store_coins(0)
+            .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
+            .store_ref(state_init)
+            .store_ref(body)
+            .end_cell();
+}
+
+() recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { ;; ignore empty messages
+        return ();
+    }
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+
+    if (flags & 1) { ;; ignore all bounced messages
+        return ();
+    }
+    slice sender_address = cs~load_msg_addr();
+    cs~load_msg_addr(); ;; skip dst
+    cs~load_coins(); ;; skip value
+    cs~skip_bits(1); ;; skip extracurrency collection
+    cs~load_coins(); ;; skip ihr_fee
+    int fwd_fee = muldiv(cs~load_coins(), 3, 2); ;; we use message fwd_fee for estimation of provide_wallet_address cost
+
+    int op = in_msg_body~load_uint(32);
+    int query_id = in_msg_body~load_uint(64);
+
+    if (op == op::mint()) {
+        int amount = in_msg_body~load_coins();
+        slice recipient = in_msg_body~load_msg_addr();
+        force_chain(recipient);
+
+        int forward_amount = in_msg_body~load_coins();
+        cell forward_payload = in_msg_body~load_maybe_ref();
+        slice return_excesses_to = in_msg_body~load_msg_addr();
+
+        throw_unless(75, msg_value > amount + forward_amount + 2 * (fwd_fee + gas_consumption()));
+
+        int total_supply = get_total_supply();
+
+        total_supply += amount;
+        raw_reserve(minimal_balance() + total_supply, 0);
+
+        cell internal_transfer_body = begin_cell()
+                .store_uint(op::internal_transfer(), 32)
+                .store_uint(query_id, 64)
+                .store_coins(amount)
+                .store_slice(my_address()) ;; from_address
+                .store_slice(return_excesses_to) ;; response_address
+                .store_coins(forward_amount)
+                .store_maybe_ref(forward_payload)
+                .end_cell();
+
+        send_raw_message(
+                internal_transfer::build_message(internal_transfer_body, amount, recipient),
+                send_mode:all_not_reserved()
+        );
+
+        set_total_supply(total_supply);
+        return ();
+    }
+
+    if (op == op::burn_notification_ext()) {
+        int amount = in_msg_body~load_coins();
+        slice wallet_owner = in_msg_body~load_msg_addr();
+
+        slice expected_wallet_address = jetton_wallet:calculate_address(wallet_owner, my_address(), jetton_wallet_code());
+        throw_unless(74, equal_slices(expected_wallet_address, sender_address));
+
+        int total_supply = get_total_supply();
+        total_supply -= amount;
+        set_total_supply(total_supply);
+
+        raw_reserve(minimal_balance() + total_supply, 0);
+
+        slice recipient = in_msg_body~load_msg_addr();
+        cell custom_payload = in_msg_body~load_maybe_ref();
+
+        cell excesses_message = begin_cell()
+                .store_uint(msg_flag:non_bounceable(), 6)
+                .store_slice(recipient)
+                .store_coins(0)
+                .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+                .store_uint(op::release(), 32)
+                .store_uint(query_id, 64)
+                .store_maybe_ref(custom_payload)
+                .end_cell();
+
+        send_raw_message(excesses_message, send_mode:all_not_reserved());
+        return ();
+    }
+
+    if (op == op::provide_wallet_address()) {
+        throw_unless(75, msg_value > fwd_fee + gas_consumption());
+
+        slice owner_address = in_msg_body~load_msg_addr();
+        int include_address? = in_msg_body~load_uint(1);
+
+        cell included_address = include_address?
+                ? begin_cell().store_slice(owner_address).end_cell()
+                : null();
+
+        builder msg = begin_cell()
+                .store_uint(msg_flag:bounceable(), 6)
+                .store_slice(sender_address)
+                .store_coins(0)
+                .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+                .store_uint(op::take_wallet_address(), 32)
+                .store_uint(query_id, 64);
+
+        if (is_resolvable?(owner_address)) {
+            msg = msg.store_slice(jetton_wallet:calculate_address(owner_address, my_address(), jetton_wallet_code()));
+        } else {
+            msg = msg.store_uint(0, 2); ;; addr_none
+        }
+
+        send_raw_message(msg.store_maybe_ref(included_address).end_cell(), send_mode:remaining_gas());
+        return ();
+    }
+
+    throw(0xffff);
+}
+
+(int, int, slice, cell, cell) get_jetton_data() method_id {
+    int total_supply = get_total_supply();
+    return (total_supply, -1, null_address(), jetton_content(), jetton_wallet_code());
+}
+
+slice get_wallet_address(slice owner_address) method_id {
+    int total_supply = get_total_supply();
+    return jetton_wallet:calculate_address(owner_address, my_address(), jetton_wallet_code());
+}

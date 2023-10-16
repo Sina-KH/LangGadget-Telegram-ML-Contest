@@ -1,0 +1,16 @@
+"TonUtil.fif" include
+"Asm.fif" include
+
+"build/contract.pk" load-generate-keypair // generate key pair
+constant private_key  // save private to constant
+constant public_key // save public to constant
+
+<b
+  public_key B, // add bin public key to cell
+  0 256 u,
+  0 8 u, // is_initialized
+  0 256 u, // action id
+  0 8 u, // is_paused
+  dictnew dict, // empty whitelist
+  dictnew dict, // empty consuming actions
+b>

@@ -1,0 +1,11 @@
+# Tests runner
+pytest
+
+# Documentation
+Sphinx
+sphinx-rtd-theme
+
+# Code checkers
+flake8
+mypy
+pylint

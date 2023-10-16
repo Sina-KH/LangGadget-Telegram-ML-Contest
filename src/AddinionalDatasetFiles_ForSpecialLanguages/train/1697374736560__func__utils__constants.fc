@@ -1,0 +1,5 @@
+const error::unknown_op = 101;
+const error::balance_too_low = 102;
+
+const int default_dict_key_len = 64;
+const int min_tons_for_storage = 50000000;

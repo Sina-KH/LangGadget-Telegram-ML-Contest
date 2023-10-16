@@ -1,0 +1,166 @@
+{-
+
+  TASK 5 - Address encoder
+  Write the method that for any valid MsgAddressInt with addr_std constructor
+  without anycast
+  (see https://github.com/ton-blockchain/ton/blob/master/crypto/block/block.tlb#L105)
+ returns the slice that contain ASCII encoded base64url user-friendly bouncable
+ address (without test-only flag), see https://ton.org/docs/#/howto/step-by-step?id=_1-smart-contract-addresses
+-}
+
+;;
+;; /*
+;;         Name  : CRC-16 CCITT
+;;         Poly  : 0x8408
+;;         Init  : 0xFFFF
+;;                 Revert: false
+;;                 XorOut: 0x0000
+;;                 Check : 0x6F91 ("123456789")
+;;         MaxLen: 4095 байт (32767 бит) - обнаружение
+;;         одинарных, двойных, тройных и всех нечетных ошибок
+;;         */
+;;         unsigned short crc_ccitt_update (unsigned short crc, unsigned char data)
+;; {
+;;         unsigned short t;
+;;          crc = 10000000 00000001
+;;          data= 00001000 10111010
+;;                 data ^= crc&255;
+;;         crc = 0000 заново зануляет 00001 => 0000 0001 = 0x1
+
+;;         data    = 00001000 10111010
+;;         crc&255 = 00000000 00000001
+;; crc(xOR)data    = 00001000 10111011
+;;                 data ^= data << 4;
+;;         data << 4 : 10001011 10110000
+;;         data      = 00001000 10111011
+;;       xor         = 10000011 00001011
+;;         t = (((unsigned short)data << 8) | ((crc>>8)&255));
+;;          crc =                   10000000 00000001
+;;          crc>>8       : 00000000 10000000
+;;          (crc>>8)&255): 00000000 10000000
+;;
+;;         (unsigned short)data << 8 : 00001000 10111010 ->
+;;
+;;         t ^= (unsigned char)(data >> 4);
+;;         t ^= ((unsigned short)data << 3);
+;;         return t;
+;;         }
+
+() recv_internal() {
+
+}
+;; CRC16-CCITT of the previous 34 bytes 0x1021 polynom
+(slice, int) get_crc16_old(slice data) {
+
+    int pol = 0x1021;
+    int len = 34; ;; octets qty
+    ;;slice data = create_test_data();
+    ;;builder crc = begin_cell().store_uint(0xFFFF, 16);
+    int crc = 0xFFFF;
+    int octet = 0;
+    repeat (len) {
+        octet = data~load_uint(8);
+        crc = crc ^ ((octet << 8) & 0xFFFF);
+        repeat (8) {
+            if ((crc & 0x8000) > 0) {
+                crc = ((crc << 1) ^ pol) & 0xFFFF;
+            }
+                    else {
+                        crc = (crc << 1) & 0xFFFF;
+                    }
+        }
+    }
+    return (begin_cell().store_uint(crc, 16).end_cell().begin_parse(), crc);
+}
+
+;;from tonweb Utils.js
+slice get_crc16(slice data) {
+    int poly = 0x1021;
+    int reg = 0;
+    slice ddata = begin_cell().store_slice(data).store_uint(0, 16).end_cell().begin_parse();
+    int len = ddata.slice_bits() / 8; ;;36 * 8 bits = 36 bytes
+    repeat (len) {
+        int mask = 0x80;
+        int octet = ddata~load_uint(8);
+        while (mask > 0) {
+            reg = reg << 1;
+            if (octet & mask) {
+                reg = reg + 1;
+            }
+            mask = mask >> 1;
+            if (reg > 0xFFFF) {
+                reg = reg & 0xFFFF;
+                reg = reg ^ poly;
+            }
+        }
+    }
+    slice res = begin_cell().store_uint(reg, 16).end_cell().begin_parse();
+    return res;
+}
+
+slice base64URL(slice data) method_id
+{
+    if (slice_empty?(data)) { return null(); }
+    builder bitstring = begin_cell();
+    int A = 65;
+    int a = 97;
+    int n = 48;
+    int charcode = 0;
+    var (int quotient, int reminder) = data.slice_bits() /% 18;
+    if ( reminder != 0 ) {
+        data = begin_cell()
+                .store_slice(data)
+                .store_uint(0, 18 - reminder)
+                .end_cell()
+                .begin_parse();
+    }
+    while (data.slice_bits() > 0 ){
+        charcode = data~load_uint(6);
+
+        if ( (charcode >= 0) & (charcode <= 25)) {   ;; A - Z base64
+            bitstring = bitstring.store_uint(A + charcode, 8);
+        }
+                elseif ((charcode >= 26) & (charcode <= 51)) { ;; a - z base64
+                    charcode = charcode + a - 26;              ;; offset for a base64 -> ASCII
+                    bitstring = bitstring.store_uint(charcode, 8);
+                }
+
+                        elseif ((charcode >= 52) & (charcode <= 61)) { ;; 0 - 9 base64
+                            charcode = charcode + n - 52;              ;; offset for a base64 -> ASCII
+                            bitstring = bitstring.store_uint(charcode, 8);
+                        }
+                                elseif (charcode == 62) {                        ;; - symbol
+                                    bitstring = bitstring.store_uint(45, 8);
+                                }
+
+                                        elseif (charcode == 63) {                       ;; _ symbol
+                                            bitstring = bitstring.store_uint(95, 8);
+                                        }
+    }
+    return bitstring.end_cell().begin_parse();
+}
+
+;; testable
+;; addr_std$10 anycast:(Maybe Anycast)
+;; workchain_id:int8 address:bits256  = MsgAddressInt;
+;;         addr_var$11 anycast:(Maybe Anycast) addr_len:(## 9)
+;;         workchain_id:int32 address:(bits addr_len) = MsgAddressInt;
+(slice) encode_address(slice Address) method_id {
+    (int wc, int addr_hash) = parse_std_addr(Address);
+
+    slice  uf_addr = begin_cell()
+            .store_uint(0x11, 8)
+            .store_int(wc, 8)
+            .store_uint(addr_hash, 256)
+            .end_cell()
+            .begin_parse();
+
+    slice crc = get_crc16(uf_addr);
+    slice addr_friendly_raw = begin_cell()
+            .store_slice(uf_addr)
+            .store_slice(crc)
+            .end_cell()
+            .begin_parse();
+    return base64URL(addr_friendly_raw);
+
+}

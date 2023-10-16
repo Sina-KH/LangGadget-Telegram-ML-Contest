@@ -1,0 +1,95 @@
+{-
+	Contract handles internal messages with queries with the following scheme
+	`_# score:uint32 value:(VarUInteger 16) msg:^Cell = MsgInternalBody`, where msg contains message body which shoud be sent later and store it to contract.
+	Once the number of stored queries reaches 12, contract should send and delete from storage message with the highest score and message with the lowest value (if it is the same message, it should be sent once). Messages should be sent to any address with mode 0, coin amount should be equal to value and it should contain corresponding message body. All scores and values are guaranteed to be different
+	Note, that in addition to gas-fees, storage fees will be used to determine final score. In particular, storage fee will be calculated like between each message passes 3 days (259200 seconds). Gas-units price and storage fee params will correspond to current configs of masterchain: 1000 nanoTON per 65536 bits per second + 500000 nanoTON per 65536 cells per second; gas is 10000 nanoTON per unit.
+
+
+	Example:
+	(message with score x and value y are represented as `(x,y)` )
+
+	incoming message   outcoming messages     
+	(1, 5)           | -
+	(2, 6)           | -
+	(3, 100)         | -
+	(4, 2)           | -
+	(5, 3)           | -
+	(6, 4)           | -
+	(7, 7)           | -
+	(8, 8)           | -
+	(9, 9)           | -
+	(10, 10)         | -
+	(11, 11)         | -
+	(12, 20)         | (12,20); (4,2)
+	(15, 1)          | -
+	(13, 13)         | (15, 1)
+	(14, 14)         | (14,14); (5,3)
+-}
+
+(int, cell, cell) load_data() inline {
+	slice cs = get_data().begin_parse();
+	if (cs.slice_empty?()) {
+		return (0, new_dict(), new_dict());
+	}
+	return (cs~load_uint(4), cs~load_dict(), cs.preload_dict());
+}
+
+() save_data(int count, cell score_dict, cell value_dict) impure inline {
+	set_data(begin_cell()
+		.store_uint(count, 4)
+		.store_dict(score_dict)
+		.store_dict(value_dict)
+		.end_cell()
+	);
+}
+
+() send_message(int value, cell msg) impure inline {
+	var msg = begin_cell()
+		.store_uint(0x18, 6)
+		.store_uint(0, 2) ;; addr_none .store_slice(addr)
+		.store_coins(value)
+		.store_uint(1, 1 + 4 + 4 + 64 + 32 + 1 + 1) ;; 1 - store body in reference
+		.store_ref(msg)
+		.end_cell();
+	send_raw_message(msg, 0);
+}
+
+const value_bitlen = 128;
+
+;; testable
+() recv_internal (slice in_msg_body) {
+	(int score, int value, cell msg) = (in_msg_body~load_uint(32), in_msg_body~load_coins(), in_msg_body~load_ref());
+	
+	;; score_dict: score (uint32) -> VarUInteger16 + ^Cell
+	(int count, cell score_dict, cell value_dict) = load_data();
+	cell c = begin_cell().store_uint(score, 32).store_coins(value).store_ref(msg).end_cell();
+	score_dict~udict_set_ref(32, score, c);
+	value_dict~udict_set_ref(value_bitlen, value, c);
+
+	if (count >= 11) {
+		(int lv_value, slice lv_cell, _) = value_dict~udict::delete_get_min(value_bitlen);
+
+		;; hs = Highest Score
+		(int hs_score, slice hs_cell, _) = score_dict~udict::delete_get_max(32);
+		slice hs_cs = hs_cell.preload_ref().begin_parse();
+		hs_cs~skip_bits(32); ;; score
+		int hs_value = hs_cs~load_coins();
+		cell hs_msg = hs_cs.preload_ref();
+
+		send_message(hs_value, hs_msg);
+		if (lv_value != hs_value) {
+			slice lv_cs = lv_cell.preload_ref().begin_parse();
+			int lv_score = lv_cs.preload_uint(32);
+			cell lv_msg = lv_cs.preload_ref();
+			send_message(lv_value, lv_msg);
+
+			;; score_dict~udict_delete?(32, lv_score);
+			;; value_dict~udict_delete?(value_bitlen, hs_value);
+			count -= 1;
+		}
+	} else {
+		count += 1;
+	}
+
+	save_data(count, score_dict, value_dict);
+}

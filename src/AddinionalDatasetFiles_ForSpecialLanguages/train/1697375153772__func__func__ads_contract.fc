@@ -1,0 +1,494 @@
+{-
+  ISC License
+
+  Copyright (c) 2020, Vladimir Támara Patiño vtamara@pasosdeJesus.org
+
+  Permission to use, copy, modify, and/or distribute this software for any 
+  purpose with or without fee is hereby granted, provided that the above 
+  copyright notice and this permission notice appear in all copies.
+
+  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES 
+  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF 
+  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR 
+  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES 
+  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN 
+  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF 
+  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+  ---
+
+  Manage ads in p2p market
+
+  See in README.md its operation and requirements.
+-}
+
+;;#include "debug.fc";
+
+#include "ads_constants.fc";
+
+
+{- STATE -}
+
+global int gseqno;
+global cell selling_ads;
+global cell buying_ads;
+global cell payments_buying_ads;
+
+() load_data () impure {
+  var ds = get_data().begin_parse();
+  gseqno = ds~load_uint(32);
+  selling_ads = ds~load_dict();
+  buying_ads = ds~load_dict();
+  payments_buying_ads = ds~load_dict();
+}
+
+;; Increments seqno and saves data
+() save_data () impure inline_ref {
+  set_data(begin_cell()
+  .store_uint(gseqno + 1, 32)
+  .store_dict(selling_ads)
+  .store_dict(buying_ads)
+  .store_dict(payments_buying_ads)
+  .end_cell());
+}
+
+{- 
+() dump_data () impure {
+  ~strdump("OJO dump_data");
+  ;;~strdump("manager_address:");
+  ;;slice base8ma = slice_to_hexstr(manager_address);
+  ;;base8ma~strdump();
+  ;;~strdump("manager_public_key:");
+  ;;manager_public_key~dump();
+  ~strdump("seqno:");
+  gseqno~dump();
+  ;;~strdump("fund_address:");
+  ;;slice base8fa = slice_to_hexstr(fund_address);
+  ;;base8fa~strdump();
+  ;;~strdump("fund_percentage:");
+  ;;fund_percentage~dump();
+  ~strdump("selling_ads bits:");
+  (int celdas, int bits, int refs) = compute_data_size(selling_ads, 5000);
+  bits~dump();
+  ~strdump("buying_ads bits:");
+  (int celdas, int bits, int refs) = compute_data_size(buying_ads, 5000);
+  bits~dump();
+  ~strdump("payments_buying_ads bits:");
+  (int celdas, int bits, int refs) = compute_data_size(payments_buying_ads, 5000);
+  bits~dump();
+}
+-}
+
+
+{- HELPER FUNCTIONS -}
+
+;; Send coins to seller or buyer
+() send_coins(slice address, int coins, slice text) impure {
+
+    cell msg = begin_cell()
+     .store_uint(0x18, 6)  ;; bounceable
+     .store_slice(address)
+     .store_coins(coins)
+     .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+     .store_slice(text)
+     .end_cell()
+    ;
+
+    slice smsg = msg.begin_parse();
+    var lsmsg = smsg.slice_bits();
+    lsmsg~dump();
+    send_raw_message(msg, 0); ;; pay transfer fees separately
+}
+
+;; Send utilities to manager and fund according to percentage configured
+() send_utilities(slice sender_address, int utility) impure {
+    utility~dump();
+    int forfund = (utility * fund_percentage) / 100;
+    forfund~dump();
+    int formanager = utility - forfund;
+    formanager~dump();
+
+    var msgfund = begin_cell()
+     .store_uint(0x18, 6)  ;; bounceable
+     .store_slice(fund_address)
+     .store_coins(forfund)
+     .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+     .store_slice(sender_address)
+     .end_cell()
+    ;
+    send_raw_message(msgfund, 0);
+
+    var msgmanager = begin_cell()
+     .store_uint(0x18, 6)  ;; bounceable
+     .store_slice(manager_address)
+     .store_coins(formanager)
+     .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+     .store_slice(sender_address)
+     .end_cell()
+    ;
+    send_raw_message(msgmanager, 0);
+}
+
+
+{- ANSWERS INTERNAL MESSAGES TO DO OPERATIONS -}
+
+() recv_internal (int balance, int msg_value, cell in_msg_full, slice in_msg_body) {
+
+  var fm = in_msg_full.begin_parse();
+  var flags = fm~load_uint(4);
+  ;; flags~dump();
+  slice sender_address = fm~load_msg_addr();  ;; 267 bits
+  ;; sender_address~dump();
+  slice rec_address = fm~load_msg_addr();  ;; 267 bits
+  ;; rec_address~dump();
+  int coins = fm~load_coins();
+  ;;coins~dump();
+
+  ;; If a message doesn't start with the signature --for example
+  ;; just a message with some coins. The transaction will be dropped
+  ;; If we would like to accept the coins, it should check size and
+  ;; if it is small just do return ();
+  var signature = in_msg_body~load_bits(512);
+  ;; signature~dump();
+
+  cell body2 = in_msg_body~load_ref();
+  slice cs = body2.begin_parse();
+  var cs2 = cs;
+
+  load_data();
+  ;;~dump_stack();
+
+  int mseqno = cs2~load_uint(32);
+  ;;mseqno~dump();
+  throw_unless(ERR_WRONG_SEQNO, mseqno == gseqno);
+
+  int op = cs2~load_uint(32);
+  ;;op~dump();
+
+  int msg_hash = slice_hash(cs);
+  ;;msg_hash~dump();
+
+  throw_unless(ERR_INVALID_SIGNATURE, check_signature(msg_hash, signature, manager_public_key));
+  ;;dump_stack();
+
+  throw_unless(ERR_WRONG_MESSAGE, slice_bits(sender_address) == 267);
+
+  if (op == OP_SELLER_CREATES_AD) {
+    coins~dump();
+    throw_if(ERR_INSUFFICIENT_COINS, coins < AD_MIN_COINS);
+
+    var (sd, success) = selling_ads.dict_get?(267, sender_address);
+    throw_if(ERR_SELLER_HAS_AD, success == -1);
+
+    ;;dump_stack();
+    ;;coins~dump();
+    int forad = (coins / 1000000000);  ;; Approximating to integer. Backend must allow only integer between TON + 0.2 and TON + 0.8
+    ;;forad~dump();
+    forad = forad * 1000000000;
+    ;;forad~dump();
+    int exed = coins - forad;
+    ;;exed~dump();
+    exed = exed - 10000000;  ;; Reserve in case manager needs to process
+    ;;exed~dump();
+    throw_if(ERR_INSUFFICIENT_COINS, exed < 100000000); ;; Require utility >=0.1
+
+    cell datad = begin_cell()
+      .store_coins(forad)  ;; Value
+      .store_uint(now() + AD_MAX_TIME, 64) ;; Valid until
+      .end_cell();
+
+    ;; Post ad
+    var success = selling_ads~dict_add?(267, sender_address, datad.begin_parse());
+    throw_if(ERR_CANNOT_CREATE_SELLING_AD, success != -1);
+
+    save_data();
+    send_utilities(sender_address, exed);
+    return ();
+  }
+
+  if (op == OP_SELLER_RELEASES_COINS) {
+
+    slice buyeraddr = cs2~load_msg_addr();
+    buyeraddr~dump();
+    int buyercoins = cs2~load_coins();
+
+    var (sd, success) = selling_ads.dict_get?(267, sender_address);
+    throw_if(ERR_SELLER_WITHOUT_AD, ~ success);
+
+    buyercoins~dump();
+
+    ;;~strdump("sd:");
+    ;;slice base8sd = slice_to_hexstr(sd);
+    ;;base8sd~strdump();
+
+    int adcoins = sd~load_coins();
+    int validuntil = sd~load_uint(64);
+    validuntil~dump();
+    adcoins~dump();
+    throw_if(ERR_RELEASING_MORE, buyercoins > adcoins);
+
+    ;;coins~dump();
+    throw_if(ERR_INSUFFICIENT_COINS, coins < 200000000); ;; 0.2TON 
+
+    (int success) = selling_ads~dict_delete?(267, sender_address);
+    throw_unless(ERR_CANNOT_DELETE_AD, success);
+
+    send_coins(buyeraddr, buyercoins, "Comprado en https://intercambiador.pasosdeJesus.org");
+    int remcoins = adcoins - buyercoins;
+    if (remcoins > 0) {
+      send_coins(sender_address, remcoins, "Quedó tras venta");
+    }
+
+    save_data();
+    send_utilities(sender_address, coins);
+    return ();
+  }
+
+  if (op == OP_SELLER_CANCELS_AD) {
+
+    var (sd, success) = selling_ads.dict_get?(267, sender_address);
+    throw_if(ERR_SELLER_WITHOUT_AD, ~ success);
+
+    int adcoins = sd~load_coins();
+    int validuntil = sd~load_uint(64);
+
+    throw_if(ERR_INSUFFICIENT_COINS, coins < 200000000); ;; 0.2TON 
+
+    (int success) = selling_ads~dict_delete?(267, sender_address);
+    throw_unless(ERR_CANNOT_DELETE_AD, success);
+
+    send_coins(sender_address, adcoins, "Anuncio cancelado");
+
+    save_data();
+    send_utilities(sender_address, coins);
+    return ();
+  }
+
+  if (op == OP_MANAGER_CANCELS_SELLING_AD) {
+    throw_unless(ERR_OP_MUST_BE_MANAGER, equal_slices(sender_address, manager_address));
+
+    slice selleraddr = cs2~load_msg_addr();
+
+    var (sd, success) = selling_ads.dict_get?(267, selleraddr);
+    throw_if(ERR_SELLER_WITHOUT_AD, ~ success);
+
+    int adcoins = sd~load_coins();
+    int validuntil = sd~load_uint(64);
+
+    if (cs2.slice_bits() == 0) {
+      (int success) = selling_ads~dict_delete?(267, selleraddr);
+      throw_unless(ERR_CANNOT_DELETE_AD, success);
+
+      send_coins(selleraddr, adcoins, "Anuncio cancelado por administrador");
+    } else {
+      ;; Resolving conflict
+      int coinsseller = cs2~load_coins();
+      slice buyeraddr = cs2~load_msg_addr();
+
+      throw_if(ERR_RELEASING_MORE, coinsseller > adcoins);
+
+      (int success) = selling_ads~dict_delete?(267, selleraddr);
+      throw_unless(ERR_CANNOT_DELETE_AD, success);
+
+      send_coins(selleraddr, coinsseller, "Retornado tras resolución");
+      if (coinsseller < adcoins) {
+        send_coins(buyeraddr, adcoins - coinsseller, "Pagado tras resolución");
+      }
+    }
+
+    save_data();
+    if (coins > 10000000) {
+      send_utilities(manager_address, coins - 10000000);
+    }
+    return ();
+  }
+
+
+  if (op == OP_MANAGER_DISTRIBUTES_UTILITY) { ;; Extra fees for manager and fund
+    throw_unless(ERR_OP_MUST_BE_MANAGER, equal_slices(sender_address, manager_address));
+
+    int sellers_coins = 0;
+    int numop = 0;
+
+    cell copy_sa = selling_ads;
+
+    do {
+      (slice address, slice sd, int success) = copy_sa~dict::delete_get_min(267);
+      if (success) {
+        int adcoins = sd~load_coins();
+        sellers_coins = sellers_coins + adcoins;
+        numop = numop + 1;
+      }
+    } until (~ success);
+
+    cell copy_ba = buying_ads;
+    do {
+      (slice address, slice sd, int success) = copy_ba~dict::delete_get_min(267);
+      if (success) {
+        numop = numop + 1;
+      }
+    } until (~ success);
+
+    cell copy_pba = payments_buying_ads;
+    do {
+      (slice address, slice sd, int success) = copy_pba~dict::delete_get_min(267);
+      if (success) {
+        slice payeer = sd~load_msg_addr();
+        int pcoins = sd~load_coins();
+        sellers_coins = sellers_coins + pcoins;
+        numop = numop + 1;
+      }
+    } until (~ success);
+
+
+    [int balance, cell extracurr] = get_balance();
+    int utility = balance - sellers_coins - numop * 100000000;  ;; reserve 0.1 per operation 
+    throw_if(ERR_UTILITY_BELOW_ZERO, utility < 0);
+
+    save_data();
+    send_utilities(manager_address, utility);
+    return ();
+  }
+
+  if (op == OP_MANAGER_ENDS_OPERATION) { ;; End of operation
+    throw_unless(ERR_OP_MUST_BE_MANAGER, equal_slices(sender_address, manager_address));
+
+    do {
+      (slice address, slice sd, int success) = selling_ads~dict::delete_get_min(267);
+      if (success) {
+        int mcoins = sd~load_coins();
+        int valid_until = sd~load_uint(64);
+        send_coins(address, mcoins, "Anuncio cancelado por fin de operación");
+      }
+    } until (~ success);
+
+    do {
+      (slice address, slice sd, int success) = buying_ads~dict::delete_get_min(267);
+    } until (~ success);
+
+    do {
+      (slice address, slice sd, int success) = payments_buying_ads~dict::delete_get_min(267);
+      if (success) {
+        slice payeer = sd~load_msg_addr();
+        int pcoins = sd~load_coins();
+        int valid_until = cs~load_uint(64);
+        send_coins(payeer, pcoins, "Pago retornado por fin de operación");
+      }
+    } until (~ success);
+
+    save_data();
+
+    [int balance, cell extracurr] = get_balance();
+    var msgmanager = begin_cell()
+     .store_uint(0x10, 6)  ;; nonbounceable, empty sender
+     .store_slice(manager_address)
+     .store_coins(balance)
+     .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+     .store_slice("Fin de operación")
+     .end_cell()
+    ;
+
+    send_raw_message(msgmanager, 160); ;;DESTROY_IF_ZERO + CARRY_ALL_BALANCE
+
+    return ();
+  }
+
+  throw_if(ERR_INVALID_OPERATION, -1); ;; invalid operation
+
+}
+
+
+{- GETTERS -}
+
+
+slice get_manager_address() method_id {
+  load_data();
+  return manager_address;
+}
+
+int get_public_key() method_id {
+  load_data();
+  return manager_public_key;
+}
+
+int seqno() method_id {
+  load_data();
+  return gseqno;
+}
+
+;; Returns tuple of addresses of selling ads
+tuple get_selling_ad_addresses() method_id {
+  load_data();
+  tuple ret = unsafe_tuple([]);
+
+  cell copy_sa = selling_ads;
+
+  do {
+    (slice address, slice sd, int success) = copy_sa~dict::delete_get_min(267);
+    if (success) {
+      ret~tpush(address);
+    }
+  } until (~ success);
+
+  return ret;
+}
+
+;; Returns amount of selling ads
+int get_amount_selling_ads() method_id {
+  load_data();
+
+  cell copy_sa = selling_ads;
+
+  int amount = 0;
+  do {
+    (slice address, slice sd, int success) = copy_sa~dict::delete_get_min(267);
+    if (success) {
+      amount = amount + 1;
+    }
+  } until (~ success);
+
+  return amount;
+}
+
+;; Returns the n-th selling ad
+;; n must be between 0 and get_amount_selling_ads() - 1
+;; Returns (address, coins, valid_until) or if n is out of boundaries 
+;;    returns ("", -1, 0)
+(slice, int, int) get_nth_selling_ad(int n) method_id {
+  load_data();
+
+  cell copy_sa = selling_ads;
+
+  if (n < 0) {
+    return ("", -1, 0);
+  }
+  int i = 0;
+  do {
+    (slice address, slice sd, int success) = copy_sa~dict::delete_get_min(267);
+    if (success) {
+      if (n == i) {
+        int adcoins = sd~load_coins();
+        int validuntil = sd~load_uint(64);
+
+        return (address, adcoins, validuntil);
+      }
+      i = i + 1;
+    }
+  } until (~ success);
+
+  return ("", -1, 0);
+}
+
+
+;; Returns (coins, valid_until) of a selling ad
+(int, int) get_selling_ad(slice address) method_id {
+  load_data();
+  var (sd, success) = selling_ads.dict_get?(267, address);
+  throw_unless(ERR_SELLER_WITHOUT_AD, success);
+
+  int adcoins = sd~load_coins();
+  int validuntil = sd~load_uint(64);
+
+  return (adcoins, validuntil);
+}
+
